@@ -3,13 +3,16 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use dialoguer::Input;
+use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use crate::api::{create_client_from_config, Message, ToolCall};
 use crate::config::{config_manager, ConfigValue};
 use crate::session::SessionManager;
-use crate::tools::{create_tool_manager, router::ToolRouter, ToolManager};
+use crate::tools::{create_tool_manager, router::ToolRouter, Tool, ToolManager};
 use crate::tools::builtins::register_builtin_tools;
+use crate::tools::router::{scan_python_scripts, match_python_scripts};
 use crate::utils;
 
 /// System prompt for intent detection (no tools)
@@ -34,6 +37,41 @@ const SYSTEM_PROMPT_TOOL_SELECT: &str = r#"你是一个工具选择专家。你�
 2. 可用工具列表
 
 你只需要选择合适的工具并调用它。不要添加额外解释。
+"#;
+
+/// System prompt for Python script generation
+const SYSTEM_PROMPT_PYTHON_GEN: &str = r#"你是一个专业的 Python 开发者。你的任务是根据用户需求编写一个 Python 脚本。
+
+要求：
+1. 脚本必须从命令行参数接收 JSON 格式的参数（sys.argv[1]）
+2. 脚本必须有清晰的 docstring，包含功能描述
+3. 脚本必须处理可能的错误情况
+4. 输出应该清晰、简洁
+
+脚本格式示例：
+```python
+#!/usr/bin/env python3
+"""
+功能描述
+"""
+
+import sys
+import json
+
+def main():
+    if len(sys.argv) < 2:
+        print("Error: No arguments provided")
+        sys.exit(1)
+    
+    args = json.loads(sys.argv[1])
+    # 处理参数并输出结果
+    print("执行结果")
+
+if __name__ == "__main__":
+    main()
+```
+
+只返回 Python 代码，不要有其他解释。
 "#;
 
 /// System prompt for final response generation
@@ -170,6 +208,24 @@ fn print_error(title: &str, message: &str) {
     eprintln!("{}", "═══════════════════════════════════════".red());
 }
 
+/// Get the Python scripts directory
+fn get_scripts_dir() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".sea").join("scripts"))
+        .unwrap_or_else(|| PathBuf::from("./.sea/scripts"))
+}
+
+/// Ensure the Python scripts directory exists
+fn ensure_scripts_dir() -> Result<PathBuf> {
+    let scripts_dir = get_scripts_dir();
+    if !scripts_dir.exists() {
+        fs::create_dir_all(&scripts_dir)
+            .with_context(|| format!("Failed to create scripts directory: {:?}", scripts_dir))?;
+        log::info!("Created scripts directory: {:?}", scripts_dir);
+    }
+    Ok(scripts_dir)
+}
+
 /// Run a single query
 pub async fn run_query(
     message: Option<String>,
@@ -263,6 +319,9 @@ pub async fn run_chat() -> Result<()> {
     register_builtin_tools(&mut tool_manager);
     let tool_router = ToolRouter::new();
 
+    // Ensure scripts directory exists
+    let scripts_dir = ensure_scripts_dir()?;
+
     let mut session_manager = SessionManager::new(
         config_mgr.config_dir(),
         None,
@@ -306,50 +365,57 @@ pub async fn run_chat() -> Result<()> {
             .get_messages()
             .context("No active session")?;
 
-        // ===== Round 1: Intent Detection (no tools) =====
-        log::info!("Round 1: Detecting intent...");
-        
+        // ═══════════════════════════════════════════════════════════════
+        // Step 1: Intent Detection - 判断是否需要工具
+        // ═══════════════════════════════════════════════════════════════
+        log::info!("Step 1: Detecting intent...");
+
         let mut intent_messages = messages.clone();
         intent_messages.insert(0, Message::new("system", SYSTEM_PROMPT_INTENT));
-        
+
         let intent_response = client
-            .chat_completion(&intent_messages, None, false)  // No tools
+            .chat_completion(&intent_messages, None, false)
             .await?;
 
         let intent_content = intent_response.content.unwrap_or_default();
         log::debug!("Intent response: {}", intent_content);
 
-        // Check if tool is needed
-        if intent_content.trim_start().starts_with("[TOOL_NEEDED]") {
-            log::info!("Tool needed detected: {}", intent_content.lines().next().unwrap_or(""));
+        if !intent_content.trim_start().starts_with("[TOOL_NEEDED]") {
+            // No tool needed, direct response
+            log::info!("No tool needed, using direct response");
+            println!(
+                "\n{}",
+                format!("═══ Assistant ═══").blue().bold()
+            );
+            println!("{}", intent_content);
+            println!("{}", "═══════════════════════════════════════".blue());
+            session_manager.add_message(Message::new("assistant", &intent_content))?;
+            continue;
+        }
 
-            // ===== Router: Select relevant tools =====
-            let selected_tool_names = tool_router.select_tools(user_input);
-            log::info!("Router selected {} tools: {:?}", selected_tool_names.len(), selected_tool_names);
+        log::info!("Tool needed detected: {}", intent_content.lines().next().unwrap_or(""));
 
-            let filtered_tools = tool_router.get_filtered_tools(&tool_manager, &selected_tool_names);
+        // ═══════════════════════════════════════════════════════════════
+        // Step 2: Tool Selection - 从内置工具中选择
+        // ═══════════════════════════════════════════════════════════════
+        log::info!("Step 2: Selecting from built-in tools...");
 
-            if filtered_tools.is_empty() {
-                log::warn!("Router found no matching tools, using all tools");
-                // Fallback: use intent response as answer
-                println!(
-                    "\n{}",
-                    format!("═══ Assistant ═══").blue().bold()
-                );
-                println!("我需要调用工具，但未能找到合适的工具。{}", 
-                    intent_content.strip_prefix("[TOOL_NEEDED]").unwrap_or(&intent_content).trim());
-                println!("{}", "═══════════════════════════════════════".blue());
-                session_manager.add_message(Message::new("assistant", &intent_content))?;
-                continue;
-            }
+        let selected_tool_names = tool_router.select_tools(user_input);
+        log::info!("Router selected {} tools: {:?}", selected_tool_names.len(), selected_tool_names);
 
-            // ===== Round 2: Tool Selection (with filtered tools) =====
-            log::info!("Round 2: Selecting and executing tools...");
+        let filtered_tools = tool_router.get_filtered_tools(&tool_manager, &selected_tool_names);
+
+        // Check if any built-in tool matches (excluding execute_python)
+        let has_builtin_match = filtered_tools.iter()
+            .any(|t| t.name() != "execute_python");
+
+        if has_builtin_match {
+            // ===== Execute built-in tool =====
+            log::info!("Step 2a: Executing built-in tool...");
 
             let mut tool_select_messages = messages.clone();
             tool_select_messages.insert(0, Message::new("system", SYSTEM_PROMPT_TOOL_SELECT));
-            
-            // Add tool context to user message
+
             let tool_names: Vec<&str> = filtered_tools.iter().map(|t| t.name()).collect();
             let tool_context = format!(
                 "用户需要：{}。可用工具：[{}]",
@@ -362,89 +428,183 @@ pub async fn run_chat() -> Result<()> {
                 .chat_completion(&tool_select_messages, Some(&filtered_tools), false)
                 .await?;
 
-            // Process tool calls
             if let Some(tool_calls) = &tool_response.tool_calls {
                 for tool_call in tool_calls {
-                    println!(
-                        "{}",
-                        format!("═══ Using tool: {} ═══", tool_call.function.name).cyan().bold()
-                    );
-                    log::info!("Executing tool: {} with args: {}",
-                        tool_call.function.name,
-                        tool_call.function.arguments);
-
-                    match execute_tool_call(&tool_manager, tool_call) {
-                        Ok(result) => {
-                            println!(
-                                "\n{}",
-                                format!("═══ Tool Result: {} ═══", tool_call.function.name)
-                                    .magenta()
-                                    .bold()
-                            );
-                            println!("{}", result);
-                            println!("{}", "══════════════════════════════════════════════".magenta());
-
-                            // ===== Round 3: Final Response (no tools) =====
-                            log::info!("Round 3: Generating final response...");
-
-                            let mut final_messages = messages.clone();
-                            final_messages.insert(0, Message::new("system", SYSTEM_PROMPT_FINAL));
-                            
-                            // Add tool result to context
-                            let result_context = format!(
-                                "工具执行结果：{}\n请根据这个结果回答用户的问题：{}",
-                                result, user_input
-                            );
-                            final_messages.push(Message::new("user", &result_context));
-
-                            let final_response = client
-                                .chat_completion(&final_messages, None, false)
-                                .await?;
-
-                            if let Some(content) = &final_response.content {
-                                println!(
-                                    "\n{}",
-                                    format!("═══ Assistant ═══").blue().bold()
-                                );
-                                println!("{}", content);
-                                println!("{}", "═══════════════════════════════════════".blue());
-
-                                // Record to session
-                                session_manager.add_message(Message::new("assistant", content))?;
-                                log::info!("Recorded final response: {} chars", content.len());
-                            }
-                        }
+                    match execute_tool_call_and_respond(
+                        &tool_manager,
+                        tool_call,
+                        user_input,
+                        &client,
+                        &messages,
+                        &mut session_manager,
+                    ).await {
+                        Ok(_) => {}
                         Err(e) => {
-                            let error_msg = format!("Error executing tool: {}", e);
-                            print_error("Tool Error", &error_msg);
-                            log::warn!("Tool error: {}", error_msg);
+                            print_error("Tool Error", &format!("Error executing tool: {}", e));
                         }
                     }
                 }
             } else {
-                // No tool calls, respond with intent detection result
                 log::warn!("Expected tool calls but got none");
-                println!(
-                    "\n{}",
-                    format!("═══ Assistant ═══").blue().bold()
-                );
                 println!("我需要调用工具，但未能成功选择。{}", intent_content);
-                println!("{}", "═══════════════════════════════════════".blue());
             }
-        } else {
-            // No tool needed, direct response
-            log::info!("No tool needed, using direct response");
-            
-            println!(
-                "\n{}",
-                format!("═══ Assistant ═══").blue().bold()
-            );
-            println!("{}", intent_content);
-            println!("{}", "═══════════════════════════════════════".blue());
+            continue;
+        }
 
-            // Record to session
-            session_manager.add_message(Message::new("assistant", &intent_content))?;
-            log::info!("Recorded direct response: {} chars", intent_content.len());
+        // ═══════════════════════════════════════════════════════════════
+        // Step 3: Scan Python Scripts - 扫描现有 Python 脚本
+        // ═══════════════════════════════════════════════════════════════
+        log::info!("Step 3: Scanning Python scripts in {:?}", scripts_dir);
+
+        let available_scripts = scan_python_scripts(&scripts_dir);
+        log::info!("Found {} Python scripts", available_scripts.len());
+
+        if !available_scripts.is_empty() {
+            let matched_scripts = match_python_scripts(user_input, &available_scripts);
+            log::info!("Matched {} Python scripts: {:?}", matched_scripts.len(), 
+                matched_scripts.iter().map(|s| &s.name).collect::<Vec<_>>());
+
+            if !matched_scripts.is_empty() {
+                // ===== Execute Python script =====
+                log::info!("Step 3a: Executing matched Python script...");
+
+                // Let LLM choose which script and generate args
+                let mut script_select_messages = messages.clone();
+                script_select_messages.insert(0, Message::new("system", SYSTEM_PROMPT_TOOL_SELECT));
+
+                // Provide script info with paths for LLM to use
+                let script_infos: Vec<String> = matched_scripts.iter()
+                    .map(|s| format!("{}: {}", s.name, s.path.display()))
+                    .collect();
+                let script_context = format!(
+                    "用户需要：{}。可用 Python 脚本：[{}]。请使用 execute_python 工具执行合适的脚本，需要提供 script_path 参数。",
+                    user_input,
+                    script_infos.join(", ")
+                );
+                script_select_messages.push(Message::new("user", &script_context));
+
+                // Create a temporary tool manager with only execute_python
+                let mut python_tool_manager = create_tool_manager();
+                if let Some(python_tool) = tool_manager.get_tool("execute_python") {
+                    python_tool_manager.register_tool(Box::new(PythonToolWrapper::new(
+                        python_tool.name(),
+                        python_tool.description(),
+                        python_tool.parameters(),
+                    )));
+                }
+
+                let script_response = client
+                    .chat_completion(&script_select_messages, Some(&python_tool_manager.get_available_tools()), false)
+                    .await?;
+
+                if let Some(tool_calls) = &script_response.tool_calls {
+                    for tool_call in tool_calls {
+                        if tool_call.function.name == "execute_python" {
+                            match execute_tool_call_and_respond(
+                                &tool_manager,
+                                tool_call,
+                                user_input,
+                                &client,
+                                &messages,
+                                &mut session_manager,
+                            ).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    print_error("Tool Error", &format!("Error executing script: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Step 4: Generate Python Script - 生成新的 Python 脚本
+        // ═══════════════════════════════════════════════════════════════
+        log::info!("Step 4: No matching script found, generating new Python script...");
+
+        let mut gen_messages = messages.clone();
+        gen_messages.insert(0, Message::new("system", SYSTEM_PROMPT_PYTHON_GEN));
+        gen_messages.push(Message::new("user", &format!(
+            "请编写一个 Python 脚本来完成以下任务：{}\n\n只返回 Python 代码，不要有其他解释。",
+            user_input
+        )));
+
+        let gen_response = client
+            .chat_completion(&gen_messages, None, false)
+            .await?;
+
+        let script_code = gen_response.content.unwrap_or_default();
+        log::debug!("Generated script:\n{}", script_code);
+
+        // Extract code from markdown if present
+        let script_code_clean = extract_code_from_markdown(&script_code);
+
+        // Save script
+        let script_name = generate_script_name(user_input);
+        let script_path = scripts_dir.join(format!("{}.py", script_name));
+
+        match fs::write(&script_path, &script_code_clean) {
+            Ok(_) => {
+                log::info!("Saved script to {:?}", script_path);
+                println!(
+                    "{}",
+                    format!("═══ Generated Script: {}.py ═══", script_name).green().bold()
+                );
+                println!("Saved to: {:?}", script_path);
+                println!("{}", "══════════════════════════════════════════════".green());
+
+                // ═══════════════════════════════════════════════════════════════
+                // Step 5: Execute Generated Script
+                // ═══════════════════════════════════════════════════════════════
+                log::info!("Step 5: Executing generated script...");
+
+                // Let LLM generate arguments for the script
+                let mut exec_messages = messages.clone();
+                exec_messages.insert(0, Message::new("system", SYSTEM_PROMPT_TOOL_SELECT));
+                exec_messages.push(Message::new("user", &format!(
+                    "请使用 execute_python 工具执行刚保存的脚本：{}\n脚本路径：{}",
+                    user_input, script_path.display()
+                )));
+
+                let mut python_tool_manager = create_tool_manager();
+                if let Some(python_tool) = tool_manager.get_tool("execute_python") {
+                    python_tool_manager.register_tool(Box::new(PythonToolWrapper::new(
+                        python_tool.name(),
+                        python_tool.description(),
+                        python_tool.parameters(),
+                    )));
+                }
+
+                let exec_response = client
+                    .chat_completion(&exec_messages, Some(&python_tool_manager.get_available_tools()), false)
+                    .await?;
+
+                if let Some(tool_calls) = &exec_response.tool_calls {
+                    for tool_call in tool_calls {
+                        if tool_call.function.name == "execute_python" {
+                            match execute_tool_call_and_respond(
+                                &tool_manager,
+                                tool_call,
+                                user_input,
+                                &client,
+                                &messages,
+                                &mut session_manager,
+                            ).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    print_error("Script Execution Error", &format!("Error executing script: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                print_error("Script Save Error", &format!("Failed to save script: {}", e));
+            }
         }
     }
 
@@ -454,6 +614,139 @@ pub async fn run_chat() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Helper struct to wrap Python executor tool
+struct PythonToolWrapper {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+impl PythonToolWrapper {
+    fn new(name: &str, description: &str, parameters: serde_json::Value) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            parameters,
+        }
+    }
+}
+
+impl Tool for PythonToolWrapper {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.parameters.clone()
+    }
+
+    fn execute(&self, _args: &serde_json::Value) -> Result<String> {
+        // This wrapper doesn't execute, it's just for LLM selection
+        Ok("Tool executed via execute_python".to_string())
+    }
+}
+
+/// Execute a tool call and generate response
+async fn execute_tool_call_and_respond(
+    tool_manager: &ToolManager,
+    tool_call: &ToolCall,
+    user_input: &str,
+    client: &crate::api::APIClient,
+    messages: &[Message],
+    session_manager: &mut SessionManager,
+) -> Result<()> {
+    println!(
+        "{}",
+        format!("═══ Using tool: {} ═══", tool_call.function.name).cyan().bold()
+    );
+    log::info!("Executing tool: {} with args: {}",
+        tool_call.function.name,
+        tool_call.function.arguments);
+
+    match execute_tool_call(tool_manager, tool_call) {
+        Ok(result) => {
+            println!(
+                "\n{}",
+                format!("═══ Tool Result: {} ═══", tool_call.function.name)
+                    .magenta()
+                    .bold()
+            );
+            println!("{}", result);
+            println!("{}", "══════════════════════════════════════════════".magenta());
+
+            // ===== Generate Final Response =====
+            log::info!("Generating final response...");
+
+            let mut final_messages: Vec<Message> = messages.to_vec();
+            final_messages.insert(0, Message::new("system", SYSTEM_PROMPT_FINAL));
+
+            let result_context = format!(
+                "工具执行结果：{}\n请根据这个结果回答用户的问题：{}",
+                result, user_input
+            );
+            final_messages.push(Message::new("user", &result_context));
+
+            let final_response = client
+                .chat_completion(&final_messages, None, false)
+                .await?;
+
+            if let Some(content) = &final_response.content {
+                println!(
+                    "\n{}",
+                    format!("═══ Assistant ═══").blue().bold()
+                );
+                println!("{}", content);
+                println!("{}", "═══════════════════════════════════════".blue());
+
+                session_manager.add_message(Message::new("assistant", content))?;
+                log::info!("Recorded final response: {} chars", content.len());
+            }
+        }
+        Err(e) => {
+            let error_msg = format!("Error executing tool: {}", e);
+            print_error("Tool Error", &error_msg);
+            log::warn!("Tool error: {}", error_msg);
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract code from markdown code blocks
+fn extract_code_from_markdown(content: &str) -> String {
+    if let Some(start) = content.find("```python") {
+        let rest = &content[start + 9..];
+        if let Some(end) = rest.find("```") {
+            return rest[..end].trim().to_string();
+        }
+    }
+    if let Some(start) = content.find("```") {
+        let rest = &content[start + 3..];
+        if let Some(end) = rest.find("```") {
+            return rest[..end].trim().to_string();
+        }
+    }
+    content.trim().to_string()
+}
+
+/// Generate a script name from user input
+fn generate_script_name(user_input: &str) -> String {
+    // Take first few words and sanitize
+    user_input
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("_")
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Set a configuration value

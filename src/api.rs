@@ -115,12 +115,6 @@ pub struct Usage {
 pub enum APIError {
     #[error("HTTP error {0}: {1}")]
     HttpError(u16, String),
-    #[allow(dead_code)]
-    #[error("Request failed: {0}")]
-    RequestError(String),
-    #[allow(dead_code)]
-    #[error("Unexpected error: {0}")]
-    UnexpectedError(String),
 }
 
 /// Client for communicating with LLM APIs

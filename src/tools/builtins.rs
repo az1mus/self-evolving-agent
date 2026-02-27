@@ -309,6 +309,84 @@ impl Tool for ShellTool {
     }
 }
 
+/// Tool to execute Python scripts
+pub struct PythonExecutorTool;
+
+impl Tool for PythonExecutorTool {
+    fn name(&self) -> &str {
+        "execute_python"
+    }
+
+    fn description(&self) -> &str {
+        "Execute a Python script with given arguments. Use this to run external Python scripts for complex tasks."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "script_path": {
+                    "type": "string",
+                    "description": "Path to the Python script to execute"
+                },
+                "args": {
+                    "type": "object",
+                    "description": "Arguments to pass to the Python script as JSON"
+                }
+            },
+            "required": ["script_path", "args"]
+        })
+    }
+
+    fn execute(&self, args: &Value) -> Result<String> {
+        let script_path = args["script_path"]
+            .as_str()
+            .with_context(|| "script_path is required")?;
+        
+        let script_args = args["args"]
+            .as_object()
+            .with_context(|| "args must be an object")?;
+
+        // Validate script exists
+        let path = PathBuf::from(script_path);
+        if !path.exists() {
+            return Ok(format!("Error: Script not found: {}", script_path));
+        }
+
+        if !path.is_file() {
+            return Ok(format!("Error: Not a file: {}", script_path));
+        }
+
+        // Serialize args to JSON string
+        let args_json = serde_json::to_string(script_args)
+            .with_context(|| "Failed to serialize arguments")?;
+
+        // Execute Python script
+        let output = Command::new("python")
+            .arg(&path)
+            .arg(&args_json)
+            .output()
+            .with_context(|| format!("Failed to execute script: {}", script_path))?;
+
+        let mut result = String::from_utf8_lossy(&output.stdout).to_string();
+
+        if !output.stderr.is_empty() {
+            result.push_str("\nSTDERR: ");
+            result.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+
+        if !output.status.success() {
+            result = format!(
+                "Script failed with code {}\n{}",
+                output.status.code().unwrap_or(-1),
+                result
+            );
+        }
+
+        Ok(result)
+    }
+}
+
 /// Register all built-in tools with the tool manager
 pub fn register_builtin_tools(tool_manager: &mut crate::tools::ToolManager) {
     let builtin_tools: Vec<Box<dyn Tool>> = vec![
@@ -317,6 +395,7 @@ pub fn register_builtin_tools(tool_manager: &mut crate::tools::ToolManager) {
         Box::new(FileWriteTool),
         Box::new(ListFilesTool),
         Box::new(ShellTool),
+        Box::new(PythonExecutorTool),
     ];
 
     for tool in builtin_tools {
