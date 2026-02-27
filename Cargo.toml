@@ -1,0 +1,40 @@
+[package]
+name = "sea"
+version = "0.1.0"
+edition = "2021"
+description = "Self-Evolved Agent (SEA) - A CLI tool for interacting with LLMs"
+authors = ["az1mus <1745488741@qq.com>"]
+license = "MIT"
+
+[dependencies]
+# CLI framework
+clap = { version = "4.4", features = ["derive"] }
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+# HTTP client
+reqwest = { version = "0.11", features = ["json"] }
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# YAML config support
+serde_yaml = "0.9"
+# Logging
+log = "0.4"
+env_logger = "0.10"
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+# UUID for session IDs
+uuid = { version = "1.6", features = ["v4"] }
+# Home directory
+dirs = "5.0"
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+# Colored terminal output
+colored = "2.1"
+# Interactive prompts
+dialoguer = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
