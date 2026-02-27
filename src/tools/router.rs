@@ -141,24 +141,103 @@ fn extract_script_description(path: &Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Match user query against available Python scripts
+/// Match user query against available Python scripts with scoring
 pub fn match_python_scripts<'a>(query: &'a str, scripts: &'a [PythonScriptInfo]) -> Vec<&'a PythonScriptInfo> {
     let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower
+        .split(|c: char| c.is_whitespace() || c == '_' || c == '-')
+        .filter(|s| !s.is_empty())
+        .collect();
     
-    scripts
+    let mut scored_scripts: Vec<(&PythonScriptInfo, i32)> = scripts
         .iter()
-        .filter(|script| {
-            // Match script name
-            if script.name.to_lowercase().contains(&query_lower) {
-                return true;
+        .filter_map(|script| {
+            let score = calculate_match_score(&query_lower, &query_words, script);
+            if score > 0 {
+                Some((script, score))
+            } else {
+                None
             }
-            // Match description
-            if script.description.to_lowercase().contains(&query_lower) {
-                return true;
-            }
-            false
         })
+        .collect();
+    
+    // Sort by score (highest first)
+    scored_scripts.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // Return top matches (limit to 5 to avoid overwhelming LLM)
+    scored_scripts
+        .into_iter()
+        .take(5)
+        .map(|(script, _)| script)
         .collect()
+}
+
+/// Calculate match score for a script against query
+fn calculate_match_score(query_lower: &str, query_words: &[&str], script: &PythonScriptInfo) -> i32 {
+    let name_lower = script.name.to_lowercase();
+    let desc_lower = script.description.to_lowercase();
+    let mut score = 0i32;
+    
+    // Exact name match (highest priority)
+    if name_lower == query_lower {
+        score += 100;
+    }
+    
+    // Name contains query (high priority)
+    if name_lower.contains(query_lower) {
+        score += 50;
+    }
+    
+    // Check each query word
+    for word in query_words {
+        if word.len() < 2 {
+            continue; // Skip very short words
+        }
+        
+        // Word in name (high priority)
+        if name_lower.contains(word) {
+            score += 30;
+        }
+        
+        // Word in description (medium priority)
+        if desc_lower.contains(word) {
+            score += 10;
+        }
+    }
+    
+    // Check for common variations (weather/天气，calculate/计算)
+    score += check_semantic_matches(query_lower, &name_lower, &desc_lower);
+    
+    score
+}
+
+/// Check for common semantic matches (Chinese-English variations)
+fn check_semantic_matches(query: &str, name: &str, desc: &str) -> i32 {
+    let mut score = 0i32;
+    
+    // Common semantic pairs
+    let semantic_pairs = [
+        ("天气", "weather"),
+        ("时间", "time"),
+        ("日期", "date"),
+        ("文件", "file"),
+        ("计算", "calc"),
+        ("转换", "convert"),
+        ("下载", "download"),
+        ("搜索", "search"),
+        ("邮件", "email"),
+        ("图片", "image"),
+    ];
+    
+    for (cn, en) in semantic_pairs.iter() {
+        // If query contains Chinese and name/desc contains English (or vice versa)
+        if (query.contains(cn) && (name.contains(en) || desc.contains(en))) ||
+           (query.contains(en) && (name.contains(cn) || desc.contains(cn))) {
+            score += 20;
+        }
+    }
+    
+    score
 }
 
 #[cfg(test)]

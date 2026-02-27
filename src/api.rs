@@ -148,6 +148,11 @@ impl APIClient {
         Ok(Self { config, client })
     }
 
+    /// Get the current model name
+    pub fn get_model(&self) -> &str {
+        &self.config.model
+    }
+
     /// Send a chat completion request to the API
     pub async fn chat_completion(
         &self,
@@ -176,6 +181,8 @@ impl APIClient {
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         });
+
+        let tools_names: Option<Vec<String>> = tools.map(|t| t.iter().map(|tool| tool.name().to_string()).collect());
 
         if let Some(tools) = tools {
             let tools_json: Vec<_> = tools
@@ -209,11 +216,18 @@ impl APIClient {
             .await
             .with_context(|| "Failed to send chat completion request")?;
 
-        self.parse_chat_response(response).await
+        self.parse_chat_response(response, self.config.model.clone(), messages.len(), tools_names)
+            .await
     }
 
     /// Parse a chat completion response
-    async fn parse_chat_response(&self, response: Response) -> Result<ChatResponse> {
+    async fn parse_chat_response(
+        &self,
+        response: Response,
+        _model: String,
+        _messages_count: usize,
+        _tools_used: Option<Vec<String>>,
+    ) -> Result<ChatResponse> {
         let status = response.status();
 
         if !status.is_success() {
@@ -272,13 +286,13 @@ impl APIClient {
             total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
         });
 
-        let model = data.get("model").and_then(|v| v.as_str()).map(String::from);
+        let response_model = data.get("model").and_then(|v| v.as_str()).map(String::from);
 
         Ok(ChatResponse {
             content,
             tool_calls,
             usage,
-            model,
+            model: response_model,
         })
     }
 
