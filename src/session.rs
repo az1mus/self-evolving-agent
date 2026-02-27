@@ -16,6 +16,37 @@ pub struct Session {
     pub updated_at: DateTime<Local>,
     pub messages: Vec<SessionMessage>,
     pub metadata: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_requests: Option<Vec<ApiRequestInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallInfo>>,
+}
+
+/// API request information for tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiRequestInfo {
+    pub timestamp: DateTime<Local>,
+    pub model: String,
+    pub request_type: String,
+    pub messages_count: usize,
+    pub tools_used: Option<Vec<String>>,
+    pub response_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Tool call information for tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallInfo {
+    pub timestamp: DateTime<Local>,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub result: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_time_ms: Option<u64>,
 }
 
 /// Serializable message format
@@ -71,7 +102,35 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             metadata: metadata.unwrap_or_default(),
+            api_requests: Some(Vec::new()),
+            tool_calls: Some(Vec::new()),
         }
+    }
+
+    /// Record an API request
+    pub fn record_api_request(&mut self, info: ApiRequestInfo) {
+        if let Some(ref mut requests) = self.api_requests {
+            requests.push(info);
+            self.updated_at = Local::now();
+        }
+    }
+
+    /// Record a tool call
+    pub fn record_tool_call(&mut self, info: ToolCallInfo) {
+        if let Some(ref mut calls) = self.tool_calls {
+            calls.push(info);
+            self.updated_at = Local::now();
+        }
+    }
+
+    /// Get API request history
+    pub fn get_api_requests(&self) -> Option<&Vec<ApiRequestInfo>> {
+        self.api_requests.as_ref()
+    }
+
+    /// Get tool call history
+    pub fn get_tool_calls(&self) -> Option<&Vec<ToolCallInfo>> {
+        self.tool_calls.as_ref()
     }
 
     /// Convert session to dictionary for serialization
@@ -277,5 +336,85 @@ impl SessionManager {
                 .map(Message::from)
                 .collect()
         })
+    }
+
+    /// Record an API request in the active session
+    pub fn record_api_request(
+        &mut self,
+        model: &str,
+        request_type: &str,
+        messages_count: usize,
+        tools_used: Option<Vec<String>>,
+        response_tokens: Option<u32>,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<()> {
+        let session = self
+            .active_session
+            .as_mut()
+            .context("No active session")?;
+
+        let info = ApiRequestInfo {
+            timestamp: Local::now(),
+            model: model.to_string(),
+            request_type: request_type.to_string(),
+            messages_count,
+            tools_used,
+            response_tokens,
+            metadata,
+        };
+
+        session.record_api_request(info);
+        
+        // Clone session info before saving to avoid borrow issues
+        let session_clone = session.clone();
+        self.active_session = Some(session_clone);
+        
+        let session = self.active_session.as_ref().context("No active session")?;
+        self.save_session(session)
+    }
+
+    /// Record a tool call in the active session
+    pub fn record_tool_call(
+        &mut self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        result: &str,
+        success: bool,
+        error_message: Option<String>,
+        execution_time_ms: Option<u64>,
+    ) -> Result<()> {
+        let session = self
+            .active_session
+            .as_mut()
+            .context("No active session")?;
+
+        let info = ToolCallInfo {
+            timestamp: Local::now(),
+            tool_name: tool_name.to_string(),
+            arguments,
+            result: result.to_string(),
+            success,
+            error_message,
+            execution_time_ms,
+        };
+
+        session.record_tool_call(info);
+        
+        // Clone session info before saving to avoid borrow issues
+        let session_clone = session.clone();
+        self.active_session = Some(session_clone);
+        
+        let session = self.active_session.as_ref().context("No active session")?;
+        self.save_session(session)
+    }
+
+    /// Get API request history from active session
+    pub fn get_api_requests(&self) -> Option<&Vec<ApiRequestInfo>> {
+        self.active_session.as_ref().and_then(|s| s.get_api_requests())
+    }
+
+    /// Get tool call history from active session
+    pub fn get_tool_calls(&self) -> Option<&Vec<ToolCallInfo>> {
+        self.active_session.as_ref().and_then(|s| s.get_tool_calls())
     }
 }
