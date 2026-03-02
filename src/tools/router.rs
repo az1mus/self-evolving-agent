@@ -86,6 +86,7 @@ impl Default for ToolRouter {
 
 /// Information about a Python script in the library
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PythonScriptInfo {
     pub name: String,
     pub path: PathBuf,
@@ -93,6 +94,7 @@ pub struct PythonScriptInfo {
 }
 
 /// Scan Python scripts from the library directory
+#[allow(dead_code)]
 pub fn scan_python_scripts(scripts_dir: &Path) -> Vec<PythonScriptInfo> {
     let mut scripts = Vec::new();
 
@@ -126,6 +128,7 @@ pub fn scan_python_scripts(scripts_dir: &Path) -> Vec<PythonScriptInfo> {
 }
 
 /// Extract description from Python script docstring
+#[allow(dead_code)]
 fn extract_script_description(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     
@@ -142,6 +145,7 @@ fn extract_script_description(path: &Path) -> Option<String> {
 }
 
 /// Match user query against available Python scripts with scoring
+#[allow(dead_code)]
 pub fn match_python_scripts<'a>(query: &'a str, scripts: &'a [PythonScriptInfo]) -> Vec<&'a PythonScriptInfo> {
     let query_lower = query.to_lowercase();
     let query_words: Vec<&str> = query_lower
@@ -173,6 +177,7 @@ pub fn match_python_scripts<'a>(query: &'a str, scripts: &'a [PythonScriptInfo])
 }
 
 /// Calculate match score for a script against query
+#[allow(dead_code)]
 fn calculate_match_score(query_lower: &str, query_words: &[&str], script: &PythonScriptInfo) -> i32 {
     let name_lower = script.name.to_lowercase();
     let desc_lower = script.description.to_lowercase();
@@ -212,6 +217,7 @@ fn calculate_match_score(query_lower: &str, query_words: &[&str], script: &Pytho
 }
 
 /// Check for common semantic matches (Chinese-English variations)
+#[allow(dead_code)]
 fn check_semantic_matches(query: &str, name: &str, desc: &str) -> i32 {
     let mut score = 0i32;
     

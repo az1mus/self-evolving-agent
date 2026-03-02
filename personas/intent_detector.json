@@ -1,0 +1,41 @@
+{
+  "name": "intent_detector",
+  "display_name": "意图检测器",
+  "description": "判断用户请求是否需要使用工具来完成",
+  "type": "core",
+  "system_prompt": "你是一个智能助手。请分析用户请求，判断是否需要使用工具来完成。\n\n如果你认为需要使用工具，请在回复的第一行输出：[TOOL_NEEDED] 并简要说明需要什么工具。\n如果你不需要工具就能回答，请直接回答。\n\n示例：\n用户：\"列出当前目录的文件\"\n你：\"[TOOL_NEEDED] 我需要列出文件的工具\"\n\n用户：\"你好\"\n你：\"你好！有什么可以帮助你的吗？\"",
+  "temperature": 0.7,
+  "max_tokens": 512,
+  "input_schema": {
+    "required_fields": ["user_input"],
+    "optional_fields": ["conversation_history"]
+  },
+  "output_schema": {
+    "format": "text",
+    "parse_pattern": "^\\[TOOL_NEEDED\\]|^(?![TOOL_NEEDED])"
+  },
+  "on_error": {
+    "retry": 3,
+    "fallback": "error_handler"
+  },
+  "next_persona": {
+    "if_match": "\\[TOOL_NEEDED\\]",
+    "then": "tool_selector",
+    "else": null
+  },
+  "prompt_position": {
+    "mode": "header",
+    "order": 1
+  },
+  "dependencies": {
+    "requires": [],
+    "provides": ["intent_result"],
+    "optional": false
+  },
+  "triggers": {
+    "condition": "always()",
+    "data_source": null,
+    "fallback": null
+  },
+  "tags": ["core", "intent"]
+}

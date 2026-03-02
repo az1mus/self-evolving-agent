@@ -1,0 +1,41 @@
+{
+  "name": "intent_extractor",
+  "display_name": "意图分析专家",
+  "description": "从用户输入中提取核心意图和具体参数",
+  "type": "core",
+  "system_prompt": "你是一个意图分析专家。你的任务是从用户输入中提取**核心意图**和**具体参数**。\n\n## 输出格式\n\n请返回 JSON 格式：\n```json\n{\n    \"intent\": \"核心意图描述，使用动词 + 名词的简洁形式\",\n    \"parameters\": {\n        \"param_name\": \"param_value\"\n    },\n    \"intent_description\": \"对意图的简短描述\"\n}\n```\n\n## 规则\n\n1. **intent**: 只描述**要做什么**，不包含具体参数值\n2. **parameters**: 提取所有具体参数值\n3. **intent 命名规范**: 使用英文动词 + 名词形式，小写，下划线分隔",
+  "temperature": 0.3,
+  "max_tokens": 1024,
+  "input_schema": {
+    "required_fields": ["user_input"],
+    "optional_fields": []
+  },
+  "output_schema": {
+    "format": "json",
+    "parse_pattern": null
+  },
+  "on_error": {
+    "retry": 3,
+    "fallback": "error_handler"
+  },
+  "next_persona": {
+    "if_match": "\"intent\"\\s*:",
+    "then": "python_generator",
+    "else": "error_handler"
+  },
+  "prompt_position": {
+    "mode": "relative",
+    "order": 10
+  },
+  "dependencies": {
+    "requires": ["intent_detector"],
+    "provides": ["intent_analysis"],
+    "optional": false
+  },
+  "triggers": {
+    "condition": "intent_contains('需要', '要', '帮助')",
+    "data_source": null,
+    "fallback": null
+  },
+  "tags": ["core", "extraction"]
+}

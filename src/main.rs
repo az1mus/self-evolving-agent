@@ -5,6 +5,7 @@
 mod api;
 mod cli;
 mod config;
+mod persona;
 mod session;
 mod tools;
 mod utils;
@@ -55,6 +56,25 @@ async fn main() -> Result<()> {
                 }
                 cli::SessionCommands::Delete { session_id } => {
                     cli::run_delete_session(session_id.clone())?;
+                }
+            }
+        }
+        Some(cli::Commands::Persona { command }) => {
+            match command {
+                cli::PersonaCommands::List => {
+                    cli::run_list_personas()?;
+                }
+                cli::PersonaCommands::Show { name } => {
+                    cli::run_show_persona(&name)?;
+                }
+                cli::PersonaCommands::Create { name, template } => {
+                    cli::run_create_persona(&name, &template)?;
+                }
+                cli::PersonaCommands::Reload => {
+                    cli::run_reload_personas()?;
+                }
+                cli::PersonaCommands::Stats => {
+                    cli::run_persona_stats()?;
                 }
             }
         }
